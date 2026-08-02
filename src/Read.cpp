@@ -9,6 +9,9 @@
 #include "point_cloud_io/Read.hpp"
 
 #include <filesystem>
+#include <thread>
+#include <chrono>
+#include <functional>
 
 // PCL
 #include <pcl/io/ply_io.h>
@@ -22,38 +25,30 @@
 
 namespace point_cloud_io {
 
-Read::Read(ros::NodeHandle nodeHandle) : nodeHandle_(nodeHandle), pointCloudMessage_(new sensor_msgs::PointCloud2()) {
+Read::Read(const rclcpp::NodeOptions & options) : rclcpp::Node("point_cloud_io_read", options),
+  pointCloudMessage_(std::make_shared<sensor_msgs::msg::PointCloud2>()),
+  updateDuration_(rclcpp::Duration::from_seconds(1.0))
+{
   if (!readParameters()) {
-    ros::requestShutdown();
+    rclcpp::shutdown();
   }
-  pointCloudPublisher_ = nodeHandle_.advertise<sensor_msgs::PointCloud2>(pointCloudTopic_, 1, true);
+  pointCloudPublisher_ = this->create_publisher<sensor_msgs::msg::PointCloud2>(pointCloudTopic_, rclcpp::QoS(1));
   initialize();
 }
 
 bool Read::readParameters() {
-  bool allParametersRead = true;
-  allParametersRead = nodeHandle_.getParam("file_path", filePath_) && allParametersRead;
-  allParametersRead = nodeHandle_.getParam("topic", pointCloudTopic_) && allParametersRead;
-  allParametersRead = nodeHandle_.getParam("frame", pointCloudFrameId_) && allParametersRead;
+  this->get_parameter("file_path", filePath_);
+  this->get_parameter("topic", pointCloudTopic_);
+  this->get_parameter("frame", pointCloudFrameId_);
 
   double updateRate;
-  nodeHandle_.param("rate", updateRate, 0.0);
+  this->declare_parameter<double>("rate", 0.0);
+  this->get_parameter("rate", updateRate);
   if (updateRate == 0.0) {
     isContinuouslyPublishing_ = false;
   } else {
     isContinuouslyPublishing_ = true;
-    updateDuration_.fromSec(1.0 / updateRate);
-  }
-
-  if (!allParametersRead) {
-    ROS_WARN(
-        "Could not read all parameters. Typical command-line usage:\n"
-        "rosrun point_cloud_io read"
-        " _file_path:=/home/user/my_point_cloud.ply"
-        " _topic:=/my_topic"
-        " _frame:=sensor_frame"
-        " (optional: _rate:=publishing_rate)");
-    return false;
+    updateDuration_.from_seconds(1.0 / updateRate);
   }
 
   return true;
@@ -61,17 +56,19 @@ bool Read::readParameters() {
 
 void Read::initialize() {
   if (!readFile(filePath_, pointCloudFrameId_)) {
-    ros::requestShutdown();
+    rclcpp::shutdown();
   }
 
   if (isContinuouslyPublishing_) {
-    timer_ = nodeHandle_.createTimer(updateDuration_, &Read::timerCallback, this);
+    timer_ = this->create_wall_timer(
+      std::chrono::nanoseconds(updateDuration_.nanoseconds()),
+      std::bind(&Read::timerCallback, this));
   } else {
-    ros::Duration(1.0).sleep();  // Need this to get things ready before publishing.
+    std::this_thread::sleep_for(std::chrono::seconds(1));  // Need this to get things ready before publishing.
     if (!publish()) {
-      ROS_ERROR("Something went wrong when trying to read and publish the point cloud file.");
+      RCLCPP_ERROR(this->get_logger(), "Something went wrong when trying to read and publish the point cloud file.");
     }
-    ros::requestShutdown();
+    rclcpp::shutdown();
   }
 }
 
@@ -97,27 +94,27 @@ bool Read::readFile(const std::string& filePath, const std::string& pointCloudFr
   }
 #endif
   else {
-    ROS_ERROR_STREAM("Data format not supported.");
+    RCLCPP_ERROR(this->get_logger(), "Data format not supported.");
     return false;
   }
 
   pointCloudMessage_->header.frame_id = pointCloudFrameId;
 
-  ROS_INFO_STREAM("Loaded point cloud with " << pointCloudMessage_->height * pointCloudMessage_->width << " points.");
+  RCLCPP_INFO(this->get_logger(), "Loaded point cloud with %d points.", pointCloudMessage_->height * pointCloudMessage_->width);
   return true;
 }
 
-void Read::timerCallback(const ros::TimerEvent& /*timerEvent*/) {
+void Read::timerCallback() {
   if (!publish()) {
-    ROS_ERROR("Something went wrong when trying to read and publish the point cloud file.");
+    RCLCPP_ERROR(this->get_logger(), "Something went wrong when trying to read and publish the point cloud file.");
   }
 }
 
 bool Read::publish() {
-  pointCloudMessage_->header.stamp = ros::Time::now();
-  if (pointCloudPublisher_.getNumSubscribers() > 0u) {
-    pointCloudPublisher_.publish(pointCloudMessage_);
-    ROS_INFO_STREAM("Point cloud published to topic \"" << pointCloudTopic_ << "\".");
+  pointCloudMessage_->header.stamp = this->now();
+  if (pointCloudPublisher_->get_subscription_count() > 0u) {
+    pointCloudPublisher_->publish(*pointCloudMessage_);
+    RCLCPP_INFO(this->get_logger(), "Point cloud published to topic \"%s\".", pointCloudTopic_.c_str());
   }
   return true;
 }
