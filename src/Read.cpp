@@ -42,7 +42,9 @@ bool Read::readParameters() {
   this->get_parameter("frame", pointCloudFrameId_);
 
   double updateRate;
-  this->declare_parameter<double>("rate", 0.0);
+  if (!this->has_parameter("rate")) {
+    this->declare_parameter<double>("rate", 0.0);
+}
   this->get_parameter("rate", updateRate);
   if (updateRate == 0.0) {
     isContinuouslyPublishing_ = false;
